@@ -1,0 +1,9 @@
+discord.py==2.3.2
+python-dotenv
+yt-dlp
+ffmpeg-python
+aiohttp
+PyNaCl==1.5.0
+requests
+
+
