@@ -213,6 +213,11 @@ async def remind(interaction: discord.Interaction, time: int, *, message: str):
 
 
 # ====== AGPG мем ======
+
+
+
+
+import time
 AGPG_ADMIN_ID = int(os.getenv("AGPG_ADMIN_ID", "0"))
 
 AGPG_MEMES = [
@@ -282,7 +287,8 @@ AGPG_MEMES = [
     "Суприм флексит единственным киллом с орбиты"
 ]
 
-
+BRIGADE_COOLDOWN = 300  # 5 минут
+last_brigade_call = 0
 
 class AGPGView(discord.ui.View):
     def __init__(self):
@@ -290,41 +296,38 @@ class AGPGView(discord.ui.View):
 
     @discord.ui.button(
         label="🚨 Вызвать бригаду",
-        style=discord.ButtonStyle.danger
+        style=discord.ButtonStyle.danger,
+        custom_id="call_brigade_button"
     )
     async def call_brigade(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+        print("Кнопка нажата!")
+
         global last_brigade_call
+
         now = time.time()
         remaining = BRIGADE_COOLDOWN - (now - last_brigade_call)
-
-        # Определяем, можно ли использовать response или followup
-        send_func = interaction.response.send_message if not interaction.response.is_done() else interaction.followup.send
 
         if remaining > 0:
             minutes = int(remaining // 60)
             seconds = int(remaining % 60)
-            try:
-                await send_func(
-                    f"⏳ **Бригаду можно вызывать раз в 5 минут.**\n"
-                    f"Попробуй через **{minutes} мин {seconds} сек**.",
-                    ephemeral=True
-                )
-            except Exception:
-                pass
+
+            await interaction.response.send_message(
+                f"⏳ Бригаду можно вызывать раз в 5 минут.\n"
+                f"Попробуй через {minutes} мин {seconds} сек.",
+                ephemeral=True
+            )
             return
 
         last_brigade_call = now
-        try:
-            await send_func(
-                f"🚨 **БРИГАДА ВЫЗВАНА!** <@{AGPG_ADMIN_ID}>",
-                allowed_mentions=discord.AllowedMentions(users=True)
-            )
-        except Exception:
-            pass
+
+        await interaction.response.send_message(
+            f"🚨 БРИГАДА ВЫЗВАНА! <@{AGPG_ADMIN_ID}>",
+            allowed_mentions=discord.AllowedMentions(users=True)
+        )
 
 
 
@@ -547,7 +550,13 @@ async def on_ready():
         type=discord.ActivityType.playing,
         name="Пишется на Melon Music"
     )
-    await bot.change_presence(status=discord.Status.online, activity=activity)
+    await bot.change_presence(
+        status=discord.Status.online,
+        activity=activity
+    )
+
+    # 🔥 РЕГИСТРАЦИЯ PERSISTENT VIEW (ВАЖНО ДЛЯ КНОПОК ПОСЛЕ РЕСТАРТА)
+    bot.add_view(AGPGView())
 
     print(f"Бот запущен как {bot.user}")
 
