@@ -17,6 +17,1457 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "bot_data.db")
 
+# ====== Telegram ↔ Discord Bridge ======
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "0")
+
+DISCORD_CHAT_CHANNEL_ID = os.getenv(
+    "DISCORD_CHAT_CHANNEL_ID", "0"
+)
+
+DISCORD_TG_CHANNEL_ID = os.getenv(
+    "DISCORD_TG_CHANNEL_ID", "0"
+)
+
+telegram_session = None
+telegram_task = None
+telegram_bot_id = None
+telegram_offset = 0
+
+
+
+# ============================================================
+# TELEGRAM ↔ DISCORD BRIDGE
+# ============================================================
+
+import aiohttp
+import os
+import asyncio
+import io
+
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
+
+TELEGRAM_TOKEN = os.getenv(
+    "TELEGRAM_TOKEN",
+    ""
+).strip()
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    "0"
+).strip()
+
+DISCORD_CHAT_CHANNEL_ID = os.getenv(
+    "DISCORD_CHAT_CHANNEL_ID",
+    "0"
+).strip()
+
+DISCORD_TG_CHANNEL_ID = os.getenv(
+    "DISCORD_TG_CHANNEL_ID",
+    "0"
+).strip()
+
+# ============================================================
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+# ============================================================
+
+telegram_session = None
+telegram_task = None
+
+telegram_bot_id = None
+telegram_offset = 0
+
+# ============================================================
+# TELEGRAM API
+# ============================================================
+
+async def telegram_api(method, data=None):
+
+    global telegram_session
+
+    if not TELEGRAM_TOKEN:
+
+        print(
+            "❌ TELEGRAM_TOKEN не указан в .env"
+        )
+
+        return None
+
+    if telegram_session is None:
+
+        telegram_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(
+                total=120
+            )
+        )
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/{method}"
+    )
+
+    try:
+
+        async with telegram_session.post(
+            url,
+            data=data or {}
+        ) as response:
+
+            raw = await response.read()
+
+            try:
+
+                result = await response.json(
+                    content_type=None
+                )
+
+            except Exception:
+
+                text = raw.decode(
+                    "utf-8",
+                    errors="replace"
+                )
+
+                print(
+                    "❌ Telegram вернул "
+                    f"не JSON: {text[:500]}"
+                )
+
+                return None
+
+            if not result.get("ok"):
+
+                print(
+                    "❌ Telegram API ошибка: "
+                    f"{result}"
+                )
+
+            return result
+
+    except Exception as e:
+
+        print(
+            "❌ Ошибка подключения "
+            f"к Telegram: {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# TELEGRAM FILE DOWNLOAD
+# ============================================================
+
+async def telegram_download_file(file_id):
+
+    global telegram_session
+
+    file_info = await telegram_api(
+        "getFile",
+        {
+            "file_id": file_id
+        }
+    )
+
+    if (
+        not file_info
+        or not file_info.get("ok")
+    ):
+
+        print(
+            "❌ Не удалось получить "
+            "информацию о Telegram-файле"
+        )
+
+        return None, None
+
+    file_path = (
+        file_info["result"]
+        .get("file_path")
+    )
+
+    if not file_path:
+
+        print(
+            "❌ Telegram file_path отсутствует"
+        )
+
+        return None, None
+
+    if telegram_session is None:
+
+        telegram_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(
+                total=120
+            )
+        )
+
+    url = (
+        f"https://api.telegram.org/"
+        f"file/bot{TELEGRAM_TOKEN}/"
+        f"{file_path}"
+    )
+
+    try:
+
+        async with telegram_session.get(
+            url
+        ) as response:
+
+            if response.status != 200:
+
+                error_text = await response.text(
+                    encoding="utf-8",
+                    errors="replace"
+                )
+
+                print(
+                    "❌ Ошибка скачивания "
+                    f"Telegram-файла: "
+                    f"{response.status}"
+                )
+
+                print(
+                    f"Telegram ответ: "
+                    f"{error_text[:500]}"
+                )
+
+                return None, None
+
+            file_data = await response.read()
+
+            if not file_data:
+
+                print(
+                    "❌ Telegram вернул "
+                    "пустой файл"
+                )
+
+                return None, None
+
+            filename = os.path.basename(
+                file_path
+            )
+
+            print(
+                f"📥 Telegram файл скачан: "
+                f"{filename} "
+                f"({len(file_data)} байт)"
+            )
+
+            return file_data, filename
+
+    except Exception as e:
+
+        print(
+            "❌ Ошибка скачивания "
+            f"Telegram-файла: {e}"
+        )
+
+        return None, None
+
+
+# ============================================================
+# SPLIT MESSAGE
+# ============================================================
+
+def split_message(text, limit):
+
+    if not text:
+
+        return []
+
+    if len(text) <= limit:
+
+        return [text]
+
+    parts = []
+
+    while len(text) > limit:
+
+        cut = text.rfind(
+            "\n",
+            0,
+            limit
+        )
+
+        if cut <= 0:
+
+            cut = text.rfind(
+                " ",
+                0,
+                limit
+            )
+
+        if cut <= 0:
+
+            cut = limit
+
+        parts.append(
+            text[:cut]
+        )
+
+        text = text[cut:].lstrip()
+
+    if text:
+
+        parts.append(text)
+
+    return parts
+
+
+# ============================================================
+# TELEGRAM TEXT
+# ============================================================
+
+async def send_telegram_text(text):
+
+    if not text:
+
+        return
+
+    parts = split_message(
+        text,
+        4000
+    )
+
+    for part in parts:
+
+        await telegram_api(
+            "sendMessage",
+            {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": part
+            }
+        )
+
+        await asyncio.sleep(
+            0.1
+        )
+
+
+# ============================================================
+# TELEGRAM FILE UPLOAD
+# ============================================================
+
+async def telegram_upload_file(
+    method,
+    field_name,
+    filename,
+    file_bytes,
+    caption=None,
+    extra=None
+):
+
+    global telegram_session
+
+    if telegram_session is None:
+
+        telegram_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(
+                total=120
+            )
+        )
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/{method}"
+    )
+
+    form = aiohttp.FormData()
+
+    form.add_field(
+        "chat_id",
+        str(TELEGRAM_CHAT_ID)
+    )
+
+    form.add_field(
+        field_name,
+        file_bytes,
+        filename=filename,
+        content_type="application/octet-stream"
+    )
+
+    if caption:
+
+        form.add_field(
+            "caption",
+            caption[:1024]
+        )
+
+    if extra:
+
+        for key, value in extra.items():
+
+            form.add_field(
+                key,
+                str(value)
+            )
+
+    try:
+
+        async with telegram_session.post(
+            url,
+            data=form
+        ) as response:
+
+            raw = await response.read()
+
+            try:
+
+                result = await response.json(
+                    content_type=None
+                )
+
+            except Exception:
+
+                print(
+                    "❌ Telegram upload "
+                    "вернул не JSON"
+                )
+
+                print(
+                    raw.decode(
+                        "utf-8",
+                        errors="replace"
+                    )[:500]
+                )
+
+                return None
+
+            if not result.get("ok"):
+
+                print(
+                    "❌ Ошибка отправки "
+                    f"файла в Telegram: "
+                    f"{result}"
+                )
+
+            return result
+
+    except Exception as e:
+
+        print(
+            "❌ Ошибка upload "
+            f"в Telegram: {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# DISCORD → TELEGRAM
+# ============================================================
+
+async def send_to_telegram(
+    text=None,
+    attachments=None,
+    username="Пользователь"
+):
+
+    if not TELEGRAM_TOKEN:
+
+        print(
+            "❌ TELEGRAM_TOKEN не указан"
+        )
+
+        return
+
+    if (
+        not TELEGRAM_CHAT_ID
+        or TELEGRAM_CHAT_ID == "0"
+    ):
+
+        print(
+            "❌ TELEGRAM_CHAT_ID не указан"
+        )
+
+        return
+
+    # ========================================================
+    # ТЕКСТ
+    # ========================================================
+
+    if text:
+
+        telegram_text = (
+            f"👤 {username}: {text}"
+        )
+
+        await send_telegram_text(
+            telegram_text
+        )
+
+    # ========================================================
+    # ВЛОЖЕНИЯ
+    # ========================================================
+
+    if not attachments:
+
+        return
+
+    for attachment in attachments:
+
+        try:
+
+            print(
+                f"📎 Discord attachment: "
+                f"{attachment.filename}"
+            )
+
+            file_data = await attachment.read()
+
+            if not file_data:
+
+                print(
+                    "⚠️ Файл пустой"
+                )
+
+                continue
+
+            filename = (
+                attachment.filename
+                or "file"
+            )
+
+            content_type = (
+                attachment.content_type
+                or ""
+            ).lower()
+
+            caption = (
+                f"👤 {username}"
+            )
+
+            # =================================================
+            # IMAGE
+            # =================================================
+
+            if content_type.startswith(
+                "image/"
+            ):
+
+                result = await telegram_upload_file(
+                    "sendPhoto",
+                    "photo",
+                    filename,
+                    file_data,
+                    caption
+                )
+
+            # =================================================
+            # VIDEO
+            # =================================================
+
+            elif content_type.startswith(
+                "video/"
+            ):
+
+                result = await telegram_upload_file(
+                    "sendVideo",
+                    "video",
+                    filename,
+                    file_data,
+                    caption
+                )
+
+            # =================================================
+            # AUDIO
+            # =================================================
+
+            elif content_type.startswith(
+                "audio/"
+            ):
+
+                result = await telegram_upload_file(
+                    "sendAudio",
+                    "audio",
+                    filename,
+                    file_data,
+                    caption
+                )
+
+            # =================================================
+            # ОСТАЛЬНОЕ → DOCUMENT
+            # =================================================
+
+            else:
+
+                result = await telegram_upload_file(
+                    "sendDocument",
+                    "document",
+                    filename,
+                    file_data,
+                    caption
+                )
+
+            if result and result.get("ok"):
+
+                print(
+                    "✅ Discord → Telegram "
+                    "файл отправлен"
+                )
+
+            else:
+
+                print(
+                    "❌ Discord → Telegram "
+                    "файл не отправлен"
+                )
+
+        except Exception as e:
+
+            print(
+                "❌ Ошибка Discord → "
+                f"Telegram файла: {e}"
+            )
+
+
+# ============================================================
+# TELEGRAM → DISCORD
+# ============================================================
+
+async def send_telegram_media_to_discord(
+    channel,
+    message,
+    username
+):
+
+    caption = (
+        message.get("caption")
+        or ""
+    )
+
+    # ========================================================
+    # ВСПОМОГАТЕЛЬНАЯ ОТПРАВКА ФАЙЛА
+    # ========================================================
+
+    async def send_file_to_discord(
+        file_id,
+        filename,
+        label=None
+    ):
+
+        file_data, downloaded_name = (
+            await telegram_download_file(
+                file_id
+            )
+        )
+
+        if not file_data:
+
+            return False
+
+        final_filename = (
+            filename
+            or downloaded_name
+            or "file"
+        )
+
+        discord_caption = (
+            f"👤 **{username}**"
+        )
+
+        if label:
+
+            discord_caption += (
+                f"\n{label}"
+            )
+
+        if caption:
+
+            discord_caption += (
+                f"\n{caption}"
+            )
+
+        # ====================================================
+        # ВАЖНО:
+        # bytes → BytesIO
+        # ====================================================
+
+        file_object = io.BytesIO(
+            file_data
+        )
+
+        file_object.seek(0)
+
+        try:
+
+            await channel.send(
+                content=discord_caption,
+                file=discord.File(
+                    file_object,
+                    filename=final_filename
+                )
+            )
+
+        finally:
+
+            file_object.close()
+
+        return True
+
+    # ========================================================
+    # PHOTO
+    # ========================================================
+
+    if message.get("photo"):
+
+        photo = message["photo"][-1]
+
+        success = await send_file_to_discord(
+            photo["file_id"],
+            "photo.jpg"
+        )
+
+        if success:
+
+            print(
+                "✅ Telegram → Discord "
+                "фото отправлено"
+            )
+
+        return
+
+    # ========================================================
+    # VIDEO
+    # ========================================================
+
+    if message.get("video"):
+
+        video = message["video"]
+
+        success = await send_file_to_discord(
+            video["file_id"],
+            video.get("file_name")
+            or "video.mp4"
+        )
+
+        if success:
+
+            print(
+                "✅ Telegram → Discord "
+                "видео отправлено"
+            )
+
+        return
+
+    # ========================================================
+    # ANIMATION / GIF
+    # ========================================================
+
+    if message.get("animation"):
+
+        animation = message[
+            "animation"
+        ]
+
+        success = await send_file_to_discord(
+            animation["file_id"],
+            animation.get("file_name")
+            or "animation.mp4",
+            "🎞️ Анимация"
+        )
+
+        if success:
+
+            print(
+                "✅ Telegram → Discord "
+                "GIF отправлен"
+            )
+
+        return
+
+    # ========================================================
+    # AUDIO
+    # ========================================================
+
+    if message.get("audio"):
+
+        audio = message["audio"]
+
+        success = await send_file_to_discord(
+            audio["file_id"],
+            audio.get("file_name")
+            or "audio.mp3"
+        )
+
+        if success:
+
+            print(
+                "✅ Telegram → Discord "
+                "аудио отправлено"
+            )
+
+        return
+
+    # ========================================================
+    # VOICE
+    # ========================================================
+
+    if message.get("voice"):
+
+        voice = message["voice"]
+
+        success = await send_file_to_discord(
+            voice["file_id"],
+            "voice.ogg",
+            "🎙️ Голосовое сообщение"
+        )
+
+        if success:
+
+            print(
+                "✅ Telegram → Discord "
+                "voice отправлен"
+            )
+
+        return
+
+    # ========================================================
+    # VIDEO NOTE
+    # ========================================================
+
+    if message.get("video_note"):
+
+        video_note = message[
+            "video_note"
+        ]
+
+        success = await send_file_to_discord(
+            video_note["file_id"],
+            "video_note.mp4",
+            "🎥 Видеосообщение"
+        )
+
+        if success:
+
+            print(
+                "✅ Telegram → Discord "
+                "video note отправлен"
+            )
+
+        return
+
+    # ========================================================
+    # DOCUMENT
+    # ========================================================
+
+    if message.get("document"):
+
+        document = message[
+            "document"
+        ]
+
+        success = await send_file_to_discord(
+            document["file_id"],
+            document.get("file_name")
+            or "file"
+        )
+
+        if success:
+
+            print(
+                "✅ Telegram → Discord "
+                "документ отправлен"
+            )
+
+        return
+
+    # ========================================================
+    # STICKER
+    # ========================================================
+
+    if message.get("sticker"):
+
+        sticker = message[
+            "sticker"
+        ]
+
+        sticker_name = "sticker.webp"
+
+        if sticker.get("is_animated"):
+
+            sticker_name = (
+                "sticker.tgs"
+            )
+
+        elif sticker.get("is_video"):
+
+            sticker_name = (
+                "sticker.webm"
+            )
+
+        success = await send_file_to_discord(
+            sticker["file_id"],
+            sticker_name,
+            "🎨 Стикер"
+        )
+
+        if success:
+
+            print(
+                "✅ Telegram → Discord "
+                "стикер отправлен"
+            )
+
+        return
+
+    # ========================================================
+    # КОНТАКТ
+    # ========================================================
+
+    if message.get("contact"):
+
+        contact = message[
+            "contact"
+        ]
+
+        first_name = (
+            contact.get("first_name")
+            or ""
+        )
+
+        last_name = (
+            contact.get("last_name")
+            or ""
+        )
+
+        phone = (
+            contact.get("phone_number")
+            or "Не указан"
+        )
+
+        await channel.send(
+            f"👤 **{username}**\n"
+            f"📇 Контакт: "
+            f"{first_name} {last_name}\n"
+            f"📞 {phone}"
+        )
+
+        print(
+            "✅ Telegram → Discord "
+            "контакт отправлен"
+        )
+
+        return
+
+    # ========================================================
+    # LOCATION
+    # ========================================================
+
+    if message.get("location"):
+
+        location = message[
+            "location"
+        ]
+
+        latitude = location.get(
+            "latitude"
+        )
+
+        longitude = location.get(
+            "longitude"
+        )
+
+        await channel.send(
+            f"👤 **{username}**\n"
+            f"📍 Геолокация:\n"
+            f"{latitude}, {longitude}\n"
+            f"https://maps.google.com/"
+            f"?q={latitude},{longitude}"
+        )
+
+        print(
+            "✅ Telegram → Discord "
+            "геолокация отправлена"
+        )
+
+        return
+
+    # ========================================================
+    # VENUE
+    # ========================================================
+
+    if message.get("venue"):
+
+        venue = message[
+            "venue"
+        ]
+
+        title = (
+            venue.get("title")
+            or "Место"
+        )
+
+        address = (
+            venue.get("address")
+            or "Адрес не указан"
+        )
+
+        await channel.send(
+            f"👤 **{username}**\n"
+            f"📍 **{title}**\n"
+            f"{address}"
+        )
+
+        print(
+            "✅ Telegram → Discord "
+            "место отправлено"
+        )
+
+        return
+
+    # ========================================================
+    # ПЛАТЕЖ / ДРУГИЕ ТИПЫ
+    # ========================================================
+
+    print(
+        "⚠️ Telegram сообщение "
+        "не содержит поддерживаемого media-типа"
+    )
+
+
+# ============================================================
+# TELEGRAM POLLING
+# ============================================================
+
+async def telegram_polling():
+
+    global telegram_bot_id
+    global telegram_offset
+
+    print(
+        "🔄 Запускаю Telegram bridge..."
+    )
+
+    if not TELEGRAM_TOKEN:
+
+        print(
+            "❌ TELEGRAM_TOKEN не указан "
+            "в .env"
+        )
+
+        return
+
+    # ========================================================
+    # GET ME
+    # ========================================================
+
+    me = await telegram_api(
+        "getMe"
+    )
+
+    if (
+        not me
+        or not me.get("ok")
+    ):
+
+        print(
+            "❌ Telegram бот "
+            "не подключился"
+        )
+
+        return
+
+    telegram_bot_id = (
+        me["result"]["id"]
+    )
+
+    print(
+        f"✅ Telegram бот подключен: "
+        f"@{me['result'].get('username', 'unknown')}"
+    )
+
+    # ========================================================
+    # WEBHOOK
+    # ========================================================
+
+    webhook = await telegram_api(
+        "getWebhookInfo"
+    )
+
+    if (
+        webhook
+        and webhook.get("ok")
+    ):
+
+        webhook_url = (
+            webhook["result"].get(
+                "url",
+                ""
+            )
+        )
+
+        if webhook_url:
+
+            print(
+                "⚠️ У Telegram "
+                f"установлен webhook: "
+                f"{webhook_url}"
+            )
+
+            delete_webhook = (
+                await telegram_api(
+                    "deleteWebhook",
+                    {
+                        "drop_pending_updates":
+                            "false"
+                    }
+                )
+            )
+
+            if (
+                delete_webhook
+                and delete_webhook.get("ok")
+            ):
+
+                print(
+                    "✅ Webhook удалён"
+                )
+
+            else:
+
+                print(
+                    "❌ Не удалось "
+                    "удалить webhook"
+                )
+
+        else:
+
+            print(
+                "✅ Webhook не установлен"
+            )
+
+    # ========================================================
+    # НАСТРОЙКИ
+    # ========================================================
+
+    print(
+        f"🎯 Telegram Chat ID: "
+        f"{TELEGRAM_CHAT_ID}"
+    )
+
+    print(
+        f"🎯 Discord #общение: "
+        f"{DISCORD_CHAT_CHANNEL_ID}"
+    )
+
+    print(
+        f"🎯 Discord #тг: "
+        f"{DISCORD_TG_CHANNEL_ID}"
+    )
+
+    print(
+        "📡 Telegram bridge "
+        "ожидает сообщения..."
+    )
+
+    # ========================================================
+    # ОСНОВНОЙ ЦИКЛ
+    # ========================================================
+
+    while True:
+
+        try:
+
+            result = await telegram_api(
+                "getUpdates",
+                {
+                    "offset":
+                        telegram_offset,
+
+                    "timeout":
+                        30,
+
+                    "allowed_updates":
+                        '["message"]'
+                }
+            )
+
+            if not result:
+
+                await asyncio.sleep(
+                    3
+                )
+
+                continue
+
+            if not result.get("ok"):
+
+                print(
+                    "❌ Telegram "
+                    f"getUpdates ошибка: "
+                    f"{result}"
+                )
+
+                await asyncio.sleep(
+                    5
+                )
+
+                continue
+
+            updates = result.get(
+                "result",
+                []
+            )
+
+            for update in updates:
+
+                print(
+                    "📩 TELEGRAM UPDATE:",
+                    update
+                )
+
+                telegram_offset = (
+                    update["update_id"]
+                    + 1
+                )
+
+                message = update.get(
+                    "message"
+                )
+
+                if not message:
+
+                    continue
+
+                # =================================================
+                # CHAT
+                # =================================================
+
+                chat = message.get(
+                    "chat",
+                    {}
+                )
+
+                chat_id = str(
+                    chat.get(
+                        "id",
+                        ""
+                    )
+                )
+
+                chat_title = (
+                    chat.get("title")
+                    or chat.get("username")
+                    or chat.get("first_name")
+                    or "Без названия"
+                )
+
+                print(
+                    f"💬 Telegram чат: "
+                    f"{chat_title}"
+                )
+
+                print(
+                    f"🆔 Telegram Chat ID: "
+                    f"{chat_id}"
+                )
+
+                # =================================================
+                # CHAT ID
+                # =================================================
+
+                if (
+                    TELEGRAM_CHAT_ID
+                    and TELEGRAM_CHAT_ID
+                    != "0"
+                    and chat_id
+                    != TELEGRAM_CHAT_ID
+                ):
+
+                    print(
+                        "⚠️ Это другой "
+                        "Telegram чат"
+                    )
+
+                    continue
+
+                # =================================================
+                # ОТПРАВИТЕЛЬ
+                # =================================================
+
+                sender = message.get(
+                    "from"
+                )
+
+                if not sender:
+
+                    print(
+                        "⚠️ Не удалось "
+                        "определить отправителя"
+                    )
+
+                    continue
+
+                sender_id = sender.get(
+                    "id"
+                )
+
+                if (
+                    sender_id
+                    == telegram_bot_id
+                ):
+
+                    continue
+
+                username = (
+                    sender.get(
+                        "username"
+                    )
+                    or sender.get(
+                        "first_name"
+                    )
+                    or "Пользователь"
+                )
+
+                # =================================================
+                # DISCORD CHANNEL
+                # =================================================
+
+                try:
+
+                    channel = bot.get_channel(
+                        int(
+                            DISCORD_TG_CHANNEL_ID
+                        )
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "❌ Ошибка получения "
+                        f"Discord канала: {e}"
+                    )
+
+                    continue
+
+                if channel is None:
+
+                    print(
+                        "❌ Discord канал "
+                        "#тг не найден"
+                    )
+
+                    continue
+
+                # =================================================
+                # TEXT
+                # =================================================
+
+                text = message.get(
+                    "text"
+                )
+
+                if text:
+
+                    discord_text = (
+                        f"👤 **{username}**: "
+                        f"{text}"
+                    )
+
+                    parts = split_message(
+                        discord_text,
+                        1900
+                    )
+
+                    for part in parts:
+
+                        try:
+
+                            await channel.send(
+                                part
+                            )
+
+                            print(
+                                "✅ Telegram → "
+                                "Discord текст"
+                            )
+
+                        except Exception as e:
+
+                            print(
+                                "❌ Ошибка "
+                                f"отправки текста: {e}"
+                            )
+
+                    continue
+
+                # =================================================
+                # MEDIA
+                # =================================================
+
+                try:
+
+                    await send_telegram_media_to_discord(
+                        channel,
+                        message,
+                        username
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "❌ Ошибка обработки "
+                        f"Telegram media: {e}"
+                    )
+
+        except asyncio.CancelledError:
+
+            print(
+                "🛑 Telegram bridge "
+                "остановлен"
+            )
+
+            break
+
+        except Exception as e:
+
+            print(
+                "❌ Ошибка Telegram "
+                f"polling: {e}"
+            )
+
+            await asyncio.sleep(
+                5
+            )
+
+
+# ============================================================
+# ЗАПУСК TELEGRAM BRIDGE
+# ============================================================
+
+async def start_telegram_bridge():
+
+    global telegram_task
+
+    if (
+        telegram_task is not None
+        and not telegram_task.done()
+    ):
+
+        print(
+            "⚠️ Telegram bridge "
+            "уже запущен"
+        )
+
+        return
+
+    telegram_task = (
+        asyncio.create_task(
+            telegram_polling()
+        )
+    )
+
+    print(
+        "🌉 Telegram ↔ Discord "
+        "bridge запущен"
+    )
 # ====== База данных ======
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
@@ -59,49 +1510,190 @@ async def defer_thinking(interaction: discord.Interaction):
     except:
         pass
 
-# ====== XP и статистика ======
+# ====== XP, статистика и Discord → Telegram ======
+
 @bot.event
 async def on_message(message):
-    if message.author.bot or not message.guild:
+
+    # Не обрабатываем сообщения ботов
+    if message.author.bot:
+        return
+
+    # ============================================================
+    # DISCORD #общение → TELEGRAM
+    # ============================================================
+
+    if (
+        message.guild
+        and str(message.channel.id) == DISCORD_CHAT_CHANNEL_ID
+    ):
+
+        text = message.content.strip()
+
+        username = (
+            message.author.display_name
+            or message.author.name
+            or "Пользователь"
+        )
+
+        # Отправляем в Telegram:
+        # - текст
+        # - картинки
+        # - видео
+        # - файлы
+        # - аудио
+        # и другие Discord-вложения
+
+        if text or message.attachments:
+
+            try:
+
+                await send_to_telegram(
+                    text=text,
+                    attachments=message.attachments,
+                    username=username
+                )
+
+                print(
+                    f"✅ Discord → Telegram: "
+                    f"{username}"
+                )
+
+            except Exception as e:
+
+                print(
+                    f"❌ Ошибка Discord → Telegram: "
+                    f"{e}"
+                )
+
+    # ============================================================
+    # ДАЛЬШЕ — XP И СТАТИСТИКА
+    # ============================================================
+
+    if not message.guild:
         return
 
     uid = message.author.id
     gid = message.guild.id
 
-    cursor.execute("SELECT xp, level, messages FROM xp WHERE user_id=? AND guild_id=?", (uid, gid))
+    # ============================================================
+    # ПОЛУЧАЕМ XP
+    # ============================================================
+
+    cursor.execute(
+        "SELECT xp, level, messages "
+        "FROM xp "
+        "WHERE user_id=? AND guild_id=?",
+        (uid, gid)
+    )
+
     row = cursor.fetchone()
 
     if row is None:
-        cursor.execute("INSERT INTO xp(user_id, guild_id, xp, level, messages) VALUES (?,?,?,?,?)", (uid, gid, 0, 1, 0))
-        xp, lvl, msgs = 0, 1, 0
+
+        cursor.execute(
+            "INSERT INTO xp("
+            "user_id, guild_id, xp, level, messages"
+            ") VALUES (?, ?, ?, ?, ?)",
+            (
+                uid,
+                gid,
+                0,
+                1,
+                0
+            )
+        )
+
+        xp = 0
+        lvl = 1
+        msgs = 0
+
     else:
+
         xp, lvl, msgs = row
+
+    # ============================================================
+    # ДОБАВЛЯЕМ АКТИВНОСТЬ
+    # ============================================================
 
     msgs += 1
     xp += 5
 
+    # ============================================================
+    # LEVEL UP
+    # ============================================================
+
     if xp >= lvl * 100:
+
         lvl += 1
         xp = 0
-        # Удаляем отправку сообщения в чат
-        # try:
-        #     await message.channel.send(f"🔥 **{message.author.name} поднял уровень! Теперь {lvl}!**")
-        # except:
-        #     pass
 
-    cursor.execute("UPDATE xp SET xp=?, level=?, messages=? WHERE user_id=? AND guild_id=?", (xp, lvl, msgs, uid, gid))
+        # Сообщение о повышении уровня отключено
+        # чтобы бот не спамил в чат.
 
-    cursor.execute("SELECT week_messages FROM server_stats WHERE guild_id=?", (gid,))
+    # ============================================================
+    # СОХРАНЯЕМ XP
+    # ============================================================
+
+    cursor.execute(
+        "UPDATE xp "
+        "SET xp=?, level=?, messages=? "
+        "WHERE user_id=? AND guild_id=?",
+        (
+            xp,
+            lvl,
+            msgs,
+            uid,
+            gid
+        )
+    )
+
+    # ============================================================
+    # СТАТИСТИКА СЕРВЕРА
+    # ============================================================
+
+    cursor.execute(
+        "SELECT week_messages "
+        "FROM server_stats "
+        "WHERE guild_id=?",
+        (gid,)
+    )
+
     s = cursor.fetchone()
 
     if s is None:
-        cursor.execute("INSERT INTO server_stats(guild_id, week_messages) VALUES (?,?)", (gid, 1))
+
+        cursor.execute(
+            "INSERT INTO server_stats("
+            "guild_id, week_messages"
+            ") VALUES (?, ?)",
+            (
+                gid,
+                1
+            )
+        )
+
     else:
-        cursor.execute("UPDATE server_stats SET week_messages = week_messages + 1 WHERE guild_id=?", (gid,))
+
+        cursor.execute(
+            "UPDATE server_stats "
+            "SET week_messages = "
+            "week_messages + 1 "
+            "WHERE guild_id=?",
+            (gid,)
+        )
+
+    # ============================================================
+    # СОХРАНЯЕМ БАЗУ
+    # ============================================================
 
     conn.commit()
-    await bot.process_commands(message)
 
+    # ============================================================
+    # ОБЯЗАТЕЛЬНО ОБРАБАТЫВАЕМ КОМАНДЫ
+    # ============================================================
+
+    await bot.process_commands(message)
 
 
 # ====== Остальные команды ======
@@ -541,24 +2133,120 @@ class HelpView(discord.ui.View):
         )
 
 
-
 @bot.event
 async def on_ready():
-    await tree.sync()
+
+    print(f"🤖 Бот запущен как {bot.user}")
+
+    # ============================================================
+    # SLASH-КОМАНДЫ
+    # ============================================================
+
+    try:
+        synced = await tree.sync()
+
+        print(
+            f"✅ Синхронизировано slash-команд: {len(synced)}"
+        )
+
+    except Exception as e:
+        print(
+            f"❌ Ошибка синхронизации slash-команд: {e}"
+        )
+
+    # ============================================================
+    # СТАТУС БОТА
+    # ============================================================
 
     activity = discord.Activity(
         type=discord.ActivityType.playing,
         name="Пишется на Melon Music"
     )
+
     await bot.change_presence(
         status=discord.Status.online,
         activity=activity
     )
 
-    # 🔥 РЕГИСТРАЦИЯ PERSISTENT VIEW (ВАЖНО ДЛЯ КНОПОК ПОСЛЕ РЕСТАРТА)
-    bot.add_view(AGPGView())
+    # ============================================================
+    # AGPG PERSISTENT VIEW
+    # ============================================================
 
-    print(f"Бот запущен как {bot.user}")
+    try:
+        bot.add_view(AGPGView())
+
+        print("✅ AGPGView зарегистрирован")
+
+    except Exception as e:
+        print(
+            f"❌ Ошибка регистрации AGPGView: {e}"
+        )
+
+    # ============================================================
+    # ПРОВЕРКА КАНАЛОВ DISCORD
+    # ============================================================
+
+    try:
+        chat_channel = bot.get_channel(
+            int(DISCORD_CHAT_CHANNEL_ID)
+        )
+
+        tg_channel = bot.get_channel(
+            int(DISCORD_TG_CHANNEL_ID)
+        )
+
+        if chat_channel:
+            print(
+                f"✅ #общение найден: "
+                f"{chat_channel.name}"
+            )
+        else:
+            print(
+                "❌ #общение не найден. "
+                "Проверь DISCORD_CHAT_CHANNEL_ID"
+            )
+
+        if tg_channel:
+            print(
+                f"✅ #тг найден: "
+                f"{tg_channel.name}"
+            )
+        else:
+            print(
+                "❌ #тг не найден. "
+                "Проверь DISCORD_TG_CHANNEL_ID"
+            )
+
+    except Exception as e:
+        print(
+            f"❌ Ошибка проверки Discord-каналов: {e}"
+        )
+
+    # ============================================================
+    # TELEGRAM BRIDGE
+    # ============================================================
+
+    if TELEGRAM_TOKEN:
+
+        try:
+            await start_telegram_bridge()
+
+            print(
+                "🌉 Telegram ↔ Discord bridge запущен"
+            )
+
+        except Exception as e:
+            print(
+                f"❌ Ошибка запуска Telegram bridge: {e}"
+            )
+
+    else:
+        print(
+            "⚠️ TELEGRAM_TOKEN не указан. "
+            "Telegram bridge отключён."
+        )
+
+    print("🚀 Бот полностью готов!")
 
 
 bot.run(TOKEN)
