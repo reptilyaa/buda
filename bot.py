@@ -11,6 +11,39 @@ import time
 BRIGADE_COOLDOWN = 300  # 5 минут в секундах
 last_brigade_call = 0
 
+from music.utils import (
+    format_track_duration,
+    shorten_title,
+)
+
+from music.player import MusicPlayer
+from music.views import (
+    MusicControlView,
+    build_player_embed,
+)
+
+music_players: dict[int, MusicPlayer] = {}
+
+
+def get_music_player(
+    guild_id: int,
+) -> MusicPlayer:
+
+    if guild_id not in music_players:
+
+        music_players[guild_id] = MusicPlayer(
+            bot=bot,
+            guild_id=guild_id,
+        )
+
+    return music_players[guild_id]
+from music.player import MusicPlayer
+from music.views import MusicControlView, build_player_embed
+from music.utils import (
+    format_track_duration,
+    shorten_title,
+)
+
 
 # ====== Настройки ======
 load_dotenv()
@@ -1499,18 +1532,936 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
+from music.player import MusicPlayer
+from music.views import MusicControlView, build_player_embed
 
 
+# =========================================================
+# МУЗЫКАЛЬНЫЕ ПРОИГРЫВАТЕЛИ ПО СЕРВЕРАМ
+# =========================================================
+
+music_players: dict[int, MusicPlayer] = {}
 
 
-# ====== Утилита defer ======
-async def defer_thinking(interaction: discord.Interaction):
+def get_music_player(guild_id: int) -> MusicPlayer:
+    """
+    Возвращает музыкальный проигрыватель конкретного сервера.
+    """
+
+    if guild_id not in music_players:
+
+        music_players[guild_id] = MusicPlayer(
+            bot=bot,
+            guild_id=guild_id,
+        )
+
+    return music_players[guild_id]
+
+
+# =========================================================
+# AUTO DISCONNECT MUSIC BOT
+# =========================================================
+
+auto_disconnect_tasks: dict[int, asyncio.Task] = {}
+
+
+async def auto_disconnect_after_empty(
+    guild_id: int,
+    channel_id: int,
+):
+    """
+    Если голосовой канал остаётся пустым 30 секунд —
+    бот автоматически выходит.
+    """
+
     try:
-        await interaction.response.defer(thinking=True)
-    except:
+
+        print(
+            "[MUSIC] Канал пуст. "
+            "Ожидание 30 секунд перед выходом."
+        )
+
+        await asyncio.sleep(30)
+
+        # =================================================
+        # ПОЛУЧАЕМ PLAYER
+        # =================================================
+
+        player = music_players.get(
+            guild_id
+        )
+
+        if player is None:
+            return
+
+        # =================================================
+        # ПРОВЕРЯЕМ VOICE CLIENT
+        # =================================================
+
+        voice_client = player.voice_client
+
+        if voice_client is None:
+            return
+
+        if not voice_client.is_connected():
+            return
+
+        # =================================================
+        # ПОЛУЧАЕМ ТЕКУЩИЙ КАНАЛ БОТА
+        # =================================================
+
+        current_channel = voice_client.channel
+
+        if current_channel is None:
+            return
+
+        # =================================================
+        # БОТ УЖЕ В ДРУГОМ КАНАЛЕ
+        # =================================================
+
+        if current_channel.id != channel_id:
+
+            print(
+                "[MUSIC] Бот уже находится "
+                "в другом голосовом канале."
+            )
+
+            return
+
+        # =================================================
+        # ПРОВЕРЯЕМ ЛЮДЕЙ
+        # =================================================
+
+        humans = [
+            member
+            for member in current_channel.members
+            if not member.bot
+        ]
+
+        # =================================================
+        # КТО-ТО ВЕРНУЛСЯ
+        # =================================================
+
+        if humans:
+
+            print(
+                "[MUSIC] Пользователь вернулся. "
+                "Бот остаётся в ГС."
+            )
+
+            return
+
+        # =================================================
+        # КАНАЛ ВСЁ ЕЩЁ ПУСТ
+        # =================================================
+
+        print(
+            "[MUSIC] Канал всё ещё пуст. "
+            "Бот выходит из ГС."
+        )
+
+        # =================================================
+        # ВЫХОДИМ
+        # =================================================
+
+        await player.disconnect()
+
+    except asyncio.CancelledError:
+
+        print(
+            "[MUSIC] Таймер автоматического "
+            "выхода отменён."
+        )
+
+        raise
+
+    except Exception as e:
+
+        print(
+            f"[MUSIC] Ошибка auto disconnect: {e}"
+        )
+
+    finally:
+
+        # =================================================
+        # УДАЛЯЕМ ТОЛЬКО СВОЮ ЗАДАЧУ
+        # =================================================
+
+        current_task = asyncio.current_task()
+
+        if (
+            auto_disconnect_tasks.get(guild_id)
+            is current_task
+        ):
+
+            auto_disconnect_tasks.pop(
+                guild_id,
+                None
+            )
+
+
+# =========================================================
+# VOICE STATE UPDATE
+# =========================================================
+
+@bot.event
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after: discord.VoiceState,
+):
+
+    # =====================================================
+    # ПРОВЕРЯЕМ СЕРВЕР
+    # =====================================================
+
+    guild = member.guild
+
+    guild_id = guild.id
+
+    # =====================================================
+    # PLAYER
+    # =====================================================
+
+    player = music_players.get(
+        guild_id
+    )
+
+    # =====================================================
+    # ЕСЛИ ЭТО САМ БОТ
+    # =====================================================
+
+    if bot.user and member.id == bot.user.id:
+
+        # -------------------------------------------------
+        # БОТ ВЫШЕЛ ИЗ ГС
+        # -------------------------------------------------
+
+        if (
+            before.channel is not None
+            and after.channel is None
+        ):
+
+            print(
+                f"[MUSIC] Бот вышел из ГС "
+                f"на сервере {guild.name}"
+            )
+
+            # ---------------------------------------------
+            # Отменяем таймер авто-выхода
+            # ---------------------------------------------
+
+            task = auto_disconnect_tasks.get(
+                guild_id
+            )
+
+            if task and not task.done():
+
+                task.cancel()
+
+            auto_disconnect_tasks.pop(
+                guild_id,
+                None
+            )
+
+            # ---------------------------------------------
+            # Если Player существует —
+            # сбрасываем его состояние
+            # ---------------------------------------------
+
+            if player is None:
+                return
+
+            player._disconnect_requested = True
+            player._skip_requested = True
+
+            player.voice_client = None
+            player.current = None
+
+            player.queue.clear()
+
+            player.is_playing = False
+
+            # ---------------------------------------------
+            # Удаляем Music Player панель
+            # ---------------------------------------------
+
+            old_message = player.message
+
+            player.message = None
+
+            if old_message:
+
+                try:
+
+                    await old_message.delete()
+
+                    print(
+                        "[MUSIC] Старая Music Player "
+                        "панель удалена."
+                    )
+
+                except discord.NotFound:
+
+                    pass
+
+                except discord.HTTPException as e:
+
+                    print(
+                        "[MUSIC] Не удалось удалить "
+                        f"старую панель: {e}"
+                    )
+
+        return
+
+    # =====================================================
+    # НИЖЕ ОБРАБАТЫВАЕМ ТОЛЬКО ПОЛЬЗОВАТЕЛЕЙ
+    # =====================================================
+
+    if player is None:
+        return
+
+    # =====================================================
+    # ЕСЛИ У БОТА НЕТ VOICE CLIENT
+    # =====================================================
+
+    voice_client = player.voice_client
+
+    if voice_client is None:
+        return
+
+    if not voice_client.is_connected():
+        return
+
+    # =====================================================
+    # ПОЛЬЗОВАТЕЛЬ ДОЛЖЕН БЫЛ ВЫЙТИ ИЗ КАНАЛА
+    # =====================================================
+
+    if before.channel is None:
+        return
+
+    old_channel = before.channel
+
+    # =====================================================
+    # БОТ ДОЛЖЕН БЫТЬ В ТОМ ЖЕ КАНАЛЕ
+    # =====================================================
+
+    if voice_client.channel is None:
+        return
+
+    if voice_client.channel.id != old_channel.id:
+        return
+
+    # =====================================================
+    # ПРОВЕРЯЕМ ЛЮДЕЙ В КАНАЛЕ
+    # =====================================================
+
+    humans = [
+        m
+        for m in old_channel.members
+        if not m.bot
+    ]
+
+    # =====================================================
+    # В КАНАЛЕ ЕЩЁ ЕСТЬ ЛЮДИ
+    # =====================================================
+
+    if humans:
+
+        print(
+            "[MUSIC] В голосовом канале "
+            "ещё есть пользователи."
+        )
+
+        # ---------------------------------------------
+        # Отменяем старый таймер
+        # ---------------------------------------------
+
+        old_task = auto_disconnect_tasks.get(
+            guild_id
+        )
+
+        if old_task and not old_task.done():
+
+            old_task.cancel()
+
+        auto_disconnect_tasks.pop(
+            guild_id,
+            None
+        )
+
+        return
+
+    # =====================================================
+    # КАНАЛ ПОЛНОСТЬЮ ПУСТ
+    # =====================================================
+
+    print(
+        f"[MUSIC] Все пользователи вышли из "
+        f"#{old_channel.name}."
+    )
+
+    # =====================================================
+    # ОТМЕНЯЕМ СТАРЫЙ ТАЙМЕР
+    # =====================================================
+
+    old_task = auto_disconnect_tasks.get(
+        guild_id
+    )
+
+    if old_task and not old_task.done():
+
+        old_task.cancel()
+
+    auto_disconnect_tasks.pop(
+        guild_id,
+        None
+    )
+
+    # =====================================================
+    # СОЗДАЁМ НОВЫЙ ТАЙМЕР
+    # =====================================================
+
+    task = asyncio.create_task(
+        auto_disconnect_after_empty(
+            guild_id=guild_id,
+            channel_id=old_channel.id,
+        )
+    )
+
+    auto_disconnect_tasks[
+        guild_id
+    ] = task
+
+
+# =========================================================
+# УТИЛИТА DEFER
+# =========================================================
+
+async def defer_thinking(
+    interaction: discord.Interaction
+):
+
+    try:
+
+        await interaction.response.defer(
+            thinking=True
+        )
+
+    except Exception:
         pass
 
+
 # ====== XP, статистика и Discord → Telegram ======
+
+
+# =========================================================
+# /PLAY
+# =========================================================
+
+@tree.command(
+    name="play",
+    description="▶️ Воспроизвести музыку с YouTube или SoundCloud",
+)
+async def play(
+    interaction: discord.Interaction,
+    query: str,
+):
+
+    # =====================================================
+    # ПРОВЕРКА СЕРВЕРА
+    # =====================================================
+
+    if interaction.guild is None:
+
+        await interaction.response.send_message(
+            "❌ Музыку можно использовать только на сервере.",
+            ephemeral=True,
+        )
+
+        return
+
+    # =====================================================
+    # ПРОВЕРКА ГОЛОСОВОГО КАНАЛА ПОЛЬЗОВАТЕЛЯ
+    # =====================================================
+
+    if not interaction.user.voice:
+
+        await interaction.response.send_message(
+            "❌ Сначала зайди в голосовой канал.",
+            ephemeral=True,
+        )
+
+        return
+
+    voice_channel = (
+        interaction.user.voice.channel
+    )
+
+    # =====================================================
+    # DEFER
+    # =====================================================
+
+    await interaction.response.defer()
+
+    # =====================================================
+    # ПОЛУЧАЕМ PLAYER
+    # =====================================================
+
+    player = get_music_player(
+        interaction.guild.id
+    )
+
+    try:
+
+        # =================================================
+        # ПРОВЕРЯЕМ СТАРОЕ / МЁРТВОЕ ПОДКЛЮЧЕНИЕ
+        # =================================================
+
+        guild_voice = (
+            interaction.guild.voice_client
+        )
+
+        stale_connection = (
+            player.voice_client is not None
+            and not player.voice_client.is_connected()
+        )
+
+        no_voice_but_old_panel = (
+            player.message is not None
+            and guild_voice is None
+        )
+
+        if (
+            stale_connection
+            or no_voice_but_old_panel
+        ):
+
+            print(
+                "[MUSIC] Обнаружено старое подключение "
+                "или старая Music Player панель."
+            )
+
+            # ---------------------------------------------
+            # ОТМЕНЯЕМ АВТО-DISCONNECT
+            # ---------------------------------------------
+
+            old_task = auto_disconnect_tasks.get(
+                interaction.guild.id
+            )
+
+            if old_task and not old_task.done():
+
+                old_task.cancel()
+
+            auto_disconnect_tasks.pop(
+                interaction.guild.id,
+                None
+            )
+
+            # ---------------------------------------------
+            # СТАРАЯ ПАНЕЛЬ
+            # ---------------------------------------------
+
+            old_message = player.message
+
+            player.message = None
+
+            # ---------------------------------------------
+            # СБРОС СОСТОЯНИЯ
+            # ---------------------------------------------
+
+            player.voice_client = None
+            player.current = None
+
+            player.queue.clear()
+
+            player.is_playing = False
+
+            # ---------------------------------------------
+            # УДАЛЯЕМ СТАРУЮ ПАНЕЛЬ
+            # ---------------------------------------------
+
+            if old_message:
+
+                try:
+
+                    await old_message.delete()
+
+                    print(
+                        "[MUSIC] Старая панель удалена."
+                    )
+
+                except discord.NotFound:
+
+                    pass
+
+                except discord.HTTPException as e:
+
+                    print(
+                        "[MUSIC] Не удалось удалить "
+                        f"старую панель: {e}"
+                    )
+
+        # =================================================
+        # ПОДКЛЮЧАЕМСЯ
+        # =================================================
+
+        await player.connect(
+            voice_channel
+        )
+
+        # =================================================
+        # ПОЛУЧАЕМ ТРЕК
+        # =================================================
+
+        track = await player.add_query(
+            query
+        )
+
+        # =================================================
+        # ЗАПУСКАЕМ МУЗЫКУ
+        # =================================================
+
+        started = False
+
+        if not player.is_currently_playing():
+
+            started = await player.play_next()
+
+        # =================================================
+        # ПАНЕЛЬ УЖЕ СУЩЕСТВУЕТ
+        # =================================================
+
+        if player.message:
+
+            await player.update_message()
+
+            if player.message:
+
+                await interaction.followup.send(
+                    f"➕ Добавлено в очередь:\n"
+                    f"**{track.title}**",
+                    ephemeral=True,
+                )
+
+                return
+
+        # =================================================
+        # СОЗДАЁМ НОВУЮ MUSIC PLAYER ПАНЕЛЬ
+        # =================================================
+
+        embed = build_player_embed(
+            player
+        )
+
+        view = MusicControlView(
+            player
+        )
+
+        message = await interaction.followup.send(
+            embed=embed,
+            view=view,
+            wait=True,
+        )
+
+        # =================================================
+        # СОХРАНЯЕМ ПАНЕЛЬ
+        # =================================================
+
+        player.message = message
+
+        await player.update_message()
+
+        # =================================================
+        # ТРЕК ДОБАВЛЕН В ОЧЕРЕДЬ
+        # =================================================
+
+        if not started:
+
+            await interaction.followup.send(
+                f"➕ Добавлено в очередь:\n"
+                f"**{track.title}**",
+                ephemeral=True,
+            )
+
+    # =====================================================
+    # ОШИБКА
+    # =====================================================
+
+    except Exception as e:
+
+        print(
+            f"[MUSIC] /play error: {e}"
+        )
+
+        try:
+
+            await interaction.followup.send(
+                "❌ Не удалось добавить музыку.\n"
+                f"```{str(e)[:1000]}```",
+                ephemeral=True,
+            )
+
+        except Exception as followup_error:
+
+            print(
+                "[MUSIC] Не удалось отправить "
+                f"сообщение об ошибке: {followup_error}"
+            )
+
+
+@tree.command(
+    name="pause",
+    description="⏸️ Поставить музыку на паузу"
+)
+async def pause(interaction: discord.Interaction):
+
+    if interaction.guild is None:
+        return
+
+    player = get_music_player(
+        interaction.guild.id
+    )
+
+    if player.pause():
+
+        await interaction.response.send_message(
+            "⏸️ Музыка поставлена на паузу."
+        )
+
+    else:
+
+        await interaction.response.send_message(
+            "❌ Сейчас ничего не играет."
+        )
+
+@tree.command(
+    name="resume",
+    description="▶️ Продолжить воспроизведение"
+)
+async def resume(interaction: discord.Interaction):
+
+    if interaction.guild is None:
+        return
+
+    player = get_music_player(
+        interaction.guild.id
+    )
+
+    if player.resume():
+
+        await interaction.response.send_message(
+            "▶️ Воспроизведение продолжено."
+        )
+
+    else:
+
+        await interaction.response.send_message(
+            "❌ Музыка не находится на паузе."
+        )
+@tree.command(
+    name="skip",
+    description="⏭️ Пропустить текущий трек"
+)
+async def skip(interaction: discord.Interaction):
+
+    if interaction.guild is None:
+        return
+
+    player = get_music_player(
+        interaction.guild.id
+    )
+
+    if player.skip():
+
+        await interaction.response.send_message(
+            "⏭️ Трек пропущен."
+        )
+
+    else:
+
+        await interaction.response.send_message(
+            "❌ Сейчас нечего пропускать."
+        )
+
+
+
+@tree.command(
+    name="stop",
+    description="⏹️ Остановить музыку и очистить очередь"
+)
+async def stop(interaction: discord.Interaction):
+
+    if interaction.guild is None:
+        return
+
+    player = get_music_player(
+        interaction.guild.id
+    )
+
+    player.stop()
+
+    await interaction.response.send_message(
+        "⏹️ Музыка остановлена, очередь очищена."
+    )
+
+
+
+@tree.command(
+    name="queue",
+    description="📋 Показать очередь музыки"
+)
+async def queue(interaction: discord.Interaction):
+
+    if interaction.guild is None:
+        return
+
+    player = get_music_player(
+        interaction.guild.id
+    )
+
+    if not player.queue:
+
+        await interaction.response.send_message(
+            "📋 Очередь пуста.",
+            ephemeral=True,
+        )
+
+        return
+
+    lines = []
+
+    for index, track in enumerate(
+        player.queue[:15],
+        start=1,
+    ):
+
+        duration = (
+            format_track_duration(
+                track.duration
+            )
+        )
+
+        title = shorten_title(
+            track.title,
+            50,
+        )
+
+        lines.append(
+            f"`{index:02}` • "
+            f"**{title}** "
+            f"`{duration}`"
+        )
+
+    embed = discord.Embed(
+        title="📋 Music Queue",
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+
+    if len(player.queue) > 15:
+
+        embed.set_footer(
+            text=(
+                f"И ещё "
+                f"{len(player.queue) - 15} трек(ов)"
+            )
+        )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+
+@tree.command(
+    name="volume",
+    description="🔊 Изменить громкость музыки"
+)
+async def volume(
+    interaction: discord.Interaction,
+    value: int,
+):
+    if interaction.guild is None:
+        return
+
+    if value < 0 or value > 100:
+
+        await interaction.response.send_message(
+            "❌ Громкость должна быть от 0 до 100.",
+            ephemeral=True,
+        )
+
+        return
+
+    player = get_music_player(
+        interaction.guild.id
+    )
+
+    player.set_volume(value)
+
+    await interaction.response.send_message(
+        f"🔊 Громкость установлена на **{value}%**."
+    )
+
+
+@tree.command(
+    name="shuffle",
+    description="🔀 Перемешать очередь"
+)
+async def shuffle(interaction: discord.Interaction):
+
+    if interaction.guild is None:
+        return
+
+    player = get_music_player(
+        interaction.guild.id
+    )
+
+    if len(player.queue) < 2:
+
+        await interaction.response.send_message(
+            "❌ В очереди недостаточно треков.",
+            ephemeral=True,
+        )
+
+        return
+
+    player.shuffle()
+
+    await interaction.response.send_message(
+        "🔀 Очередь перемешана."
+    )
+
+
+
+
+@tree.command(
+    name="loop",
+    description="🔁 Изменить режим повтора"
+)
+async def loop(interaction: discord.Interaction):
+
+    if interaction.guild is None:
+        return
+
+    player = get_music_player(
+        interaction.guild.id
+    )
+
+    mode = player.cycle_loop()
+
+    names = {
+        "off": "➡️ Выключен",
+        "track": "🔂 Текущий трек",
+        "queue": "🔁 Вся очередь",
+    }
+
+    await interaction.response.send_message(
+        f"🔁 Режим повтора: "
+        f"**{names[mode]}**"
+    )
 
 @bot.event
 async def on_message(message):
@@ -1900,7 +2851,12 @@ AGPG_MEMES = [
     "Сток флэн и Сэди Синк",
     "Расписание дамира",
     "Макис не возвращает долг",
-    "Вот дантерус уже заходит"
+    "Вот дантерус уже заходит",
+    "Диктатура диктатор диктаторы повсюду",
+    "Отчимы Хамперду",
+    "Гей парад на сходке",
+    "Буда ломает гору септика",
+    "Фарм от буды"
 ]
 
 BRIGADE_COOLDOWN = 300  # 5 минут
@@ -2067,96 +3023,411 @@ async def guessnumber(interaction: discord.Interaction):
             continue
     await interaction.followup.send(f"❌ Время вышло! Я загадал число {number}")
 
-@tree.command(name="help", description="Интерактивная справка по командам.")
-async def help_cmd(interaction: discord.Interaction):
+# =========================================================
+# HELP — ИНТЕРАКТИВНАЯ СПРАВКА
+# =========================================================
+
+HELP_COLOR = discord.Color.from_rgb(
+    155,
+    89,
+    182
+)
+
+
+def create_help_embed():
     embed = discord.Embed(
-        title="📘 Справка по командам",
-        description="Выберите категорию при помощи кнопок ниже.",
-        color=0x9b59b6
+        title="📘  Справка по боту",
+        description=(
+            "Добро пожаловать в **справку бота**!\n\n"
+            "Выберите нужную категорию ниже, "
+            "чтобы посмотреть доступные команды.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📊 **Уровни**\n"
+            "XP, уровни и активность\n\n"
+            "👤 **Информация**\n"
+            "Пользователи, серверы и роли\n\n"
+            "🛠 **Модерация**\n"
+            "Управление сообщениями\n\n"
+            "🎵 **Музыка**\n"
+            "YouTube, SoundCloud и управление плеером\n\n"
+            "🎉 **Развлечения**\n"
+            "Мемы, животные и интересные факты\n\n"
+            "🎮 **Игры**\n"
+            "Мини-игры прямо на сервере\n\n"
+            "⏰ **Полезное**\n"
+            "Напоминания и Telegram-мост"
+        ),
+        color=HELP_COLOR,
     )
+
+    embed.set_footer(
+        text="💡 Нажмите кнопку ниже, чтобы открыть категорию"
+    )
+
+    return embed
+
+
+def create_category_embed(
+    title: str,
+    description: str,
+):
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=HELP_COLOR,
+    )
+
+    embed.set_footer(
+        text="📘 /help • Используйте кнопки ниже для навигации"
+    )
+
+    return embed
+
+
+@tree.command(
+    name="help",
+    description="📘 Интерактивная справка по командам."
+)
+async def help_cmd(
+    interaction: discord.Interaction
+):
+
+    embed = create_help_embed()
+
     await interaction.response.send_message(
         embed=embed,
         view=HelpView(),
-        ephemeral=True
+        ephemeral=True,
     )
+
+
+# =========================================================
+# HELP VIEW
+# =========================================================
+
 class HelpView(discord.ui.View):
+
     def __init__(self):
-        super().__init__(timeout=180)
 
-    async def send_category(self, interaction, title, description):
-        embed = discord.Embed(title=title, description=description, color=0x9b59b6)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-
-    @discord.ui.button(label="📊 Уровни", style=discord.ButtonStyle.primary)
-    async def xp(self, interaction, button):
-        await self.send_category(
-            interaction,
-            "📊 Уровни и активность",
-            (
-                "**/rank** — ваш уровень, XP и сообщения.\n"
-                "**/stats** — статистика сервера и самый активный участник."
-            )
+        super().__init__(
+            timeout=180
         )
 
-    @discord.ui.button(label="👤 Инфо", style=discord.ButtonStyle.primary)
-    async def info(self, interaction, button):
-        await self.send_category(
-            interaction,
-            "👤 Информационные команды",
-            (
-                "**/userinfo [участник]** — информация о пользователе.\n"
-                "**/avatar [участник]** — аватар.\n"
-                "**/serverinfo** — информация о сервере.\n"
-                "**/roleinfo <роль>** — информация о роли."
-            )
+    # =====================================================
+    # ГЛАВНОЕ МЕНЮ
+    # =====================================================
+
+    async def show_main(
+        self,
+        interaction: discord.Interaction
+    ):
+
+        embed = create_help_embed()
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self,
         )
 
-    @discord.ui.button(label="🛠 Модерация", style=discord.ButtonStyle.danger)
-    async def moderation(self, interaction, button):
-        await self.send_category(
-            interaction,
-            "🛠 Модераторские команды",
-            (
-                "**/purge <число>** — удалить сообщения (до 100)."
-            )
+    # =====================================================
+    # КАТЕГОРИЯ
+    # =====================================================
+
+    async def send_category(
+        self,
+        interaction: discord.Interaction,
+        title: str,
+        description: str,
+    ):
+
+        embed = create_category_embed(
+            title,
+            description,
         )
 
-    @discord.ui.button(label="🎉 Развлечения", style=discord.ButtonStyle.success)
-    async def fun(self, interaction, button):
-        await self.send_category(
-            interaction,
-            "🎉 Развлекательные команды",
-            (
-                "**/meme** — случайный мем.\n"
-                "**/cat** — кот.\n"
-                "**/dog** — собака.\n"
-                "**/fact** — интересный факт.\n"
-                "**/agpg ** — Рандомный мем AGPG."
-            )
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self,
         )
 
-    @discord.ui.button(label="🎮 Игры", style=discord.ButtonStyle.success)
-    async def games(self, interaction, button):
+    # =====================================================
+    # 📊 УРОВНИ
+    # =====================================================
+
+    @discord.ui.button(
+        label="📊 Уровни",
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def xp(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
         await self.send_category(
             interaction,
-            "🎮 Мини-игры",
+            "📊  Уровни и активность",
             (
-                "**/guessnumber** — угадай число от 1 до 100."
-            )
+                "Отслеживайте свою активность и прогресс.\n\n"
+
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                "📈 **/rank**\n"
+                "Показывает ваш уровень, XP и количество сообщений.\n\n"
+
+                "📊 **/stats**\n"
+                "Статистика сервера и самый активный участник."
+            ),
         )
 
-    @discord.ui.button(label="⏰ Полезное", style=discord.ButtonStyle.secondary)
-    async def utility(self, interaction, button):
+    # =====================================================
+    # 👤 ИНФОРМАЦИЯ
+    # =====================================================
+
+    @discord.ui.button(
+        label="👤 Инфо",
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def info(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
         await self.send_category(
             interaction,
-            "⏰ Полезные команды",
+            "👤  Информационные команды",
             (
-                "**/remind <сек> <текст>** — напоминание.\n\n"
-                "**🌐 ТГ чат-мост** — двусторонняя связь Discord ↔ Telegram.\n"
-                "Сообщения из Discord автоматически приходят в ТГ-чат, "
-                "а сообщения из ТГ-чата — в Discord-канал."
-            )
+                "Получите информацию о пользователях, "
+                "сервере и ролях.\n\n"
+
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                "👤 **/userinfo [участник]**\n"
+                "Информация о пользователе.\n\n"
+
+                "🖼️ **/avatar [участник]**\n"
+                "Показывает аватар пользователя.\n\n"
+
+                "🏠 **/serverinfo**\n"
+                "Информация о Discord-сервере.\n\n"
+
+                "🎭 **/roleinfo <роль>**\n"
+                "Информация о выбранной роли."
+            ),
+        )
+
+    # =====================================================
+    # 🛠 МОДЕРАЦИЯ
+    # =====================================================
+
+    @discord.ui.button(
+        label="🛠 Модерация",
+        style=discord.ButtonStyle.danger,
+        row=0,
+    )
+    async def moderation(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.send_category(
+            interaction,
+            "🛠  Модерация",
+            (
+                "Инструменты для управления сообщениями "
+                "на сервере.\n\n"
+
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                "🧹 **/purge <число>**\n"
+                "Удаляет указанное количество сообщений.\n\n"
+                "Максимум — **100 сообщений** за раз."
+            ),
+        )
+
+    # =====================================================
+    # 🎵 МУЗЫКА
+    # =====================================================
+
+    @discord.ui.button(
+        label="🎵 Музыка",
+        style=discord.ButtonStyle.success,
+        row=1,
+    )
+    async def music(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.send_category(
+            interaction,
+            "🎵  Музыкальный плеер",
+            (
+                "Полноценный музыкальный плеер "
+                "прямо в голосовом канале.\n\n"
+
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                "▶️ **/play <запрос>**\n"
+                "Воспроизвести музыку.\n"
+                "Поддерживаются **YouTube** и **SoundCloud**.\n\n"
+
+                "🔎 Можно указать:\n"
+                "• название песни\n"
+                "• исполнителя\n"
+                "• ссылку на YouTube\n"
+                "• ссылку на SoundCloud\n\n"
+
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                "🎛️ **Music Player**\n"
+                "После запуска появляется интерактивная панель "
+                "управления.\n\n"
+
+                "⏯️ Пауза / продолжение\n"
+                "⏭️ Следующий трек\n"
+                "🔀 Перемешать очередь\n"
+                "🔁 Режим повтора\n"
+                "⏹️ Остановить\n"
+                "🔉🔊 Громкость\n"
+                "📋 Просмотр очереди\n"
+                "🔌 Выйти из голосового канала\n\n"
+
+                "💡 Если все пользователи покинут голосовой канал, "
+                "бот автоматически выйдет через **30 секунд**."
+            ),
+        )
+
+    # =====================================================
+    # 🎉 РАЗВЛЕЧЕНИЯ
+    # =====================================================
+
+    @discord.ui.button(
+        label="🎉 Развлечения",
+        style=discord.ButtonStyle.success,
+        row=1,
+    )
+    async def fun(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.send_category(
+            interaction,
+            "🎉  Развлекательные команды",
+            (
+                "Немного развлечений для сервера.\n\n"
+
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                "😂 **/meme**\n"
+                "Случайный мем.\n\n"
+
+                "🐱 **/cat**\n"
+                "Случайная картинка с котом.\n\n"
+
+                "🐶 **/dog**\n"
+                "Случайная картинка с собакой.\n\n"
+
+                "🧠 **/fact**\n"
+                "Интересный случайный факт.\n\n"
+
+                "🔥 **/agpg**\n"
+                "Рандомный мем AGPG."
+            ),
+        )
+
+    # =====================================================
+    # 🎮 ИГРЫ
+    # =====================================================
+
+    @discord.ui.button(
+        label="🎮 Игры",
+        style=discord.ButtonStyle.success,
+        row=1,
+    )
+    async def games(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.send_category(
+            interaction,
+            "🎮  Мини-игры",
+            (
+                "Небольшие игры прямо в Discord.\n\n"
+
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                "🎯 **/guessnumber**\n"
+                "Угадайте загаданное число "
+                "от **1 до 100**."
+            ),
+        )
+
+    # =====================================================
+    # ⏰ ПОЛЕЗНОЕ
+    # =====================================================
+
+    @discord.ui.button(
+        label="⏰ Полезное",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def utility(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.send_category(
+            interaction,
+            "⏰  Полезные функции",
+            (
+                "Инструменты для повседневного использования.\n\n"
+
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                "⏰ **/remind <сек> <текст>**\n"
+                "Создать напоминание.\n\n"
+
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+                "🌐 **Telegram ↔ Discord**\n"
+                "Двусторонний чат-мост.\n\n"
+
+                "Сообщения из Discord автоматически "
+                "передаются в Telegram-чат.\n\n"
+
+                "Сообщения из Telegram автоматически "
+                "передаются в Discord-канал."
+            ),
+        )
+
+    # =====================================================
+    # ◀ НАЗАД
+    # =====================================================
+
+    @discord.ui.button(
+        label="◀ Назад",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def back(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+
+        await self.show_main(
+            interaction
         )
 
 @bot.event
