@@ -69,7 +69,7 @@ def build_player_embed(player) -> discord.Embed:
         )
 
         embed.set_footer(
-            text="YouTube • SoundCloud • Music Player"
+            text="SoundCloud • Music Player"
         )
 
         return embed
@@ -179,7 +179,7 @@ def build_player_embed(player) -> discord.Embed:
     # --------------------------------------------------------
 
     embed.set_footer(
-        text="YouTube • SoundCloud • Music Player"
+        text="SoundCloud • Music Player"
     )
 
     return embed
@@ -568,7 +568,7 @@ class MusicControlView(discord.ui.View):
         else:
 
             embed.set_footer(
-                text="YouTube • SoundCloud"
+                text="SoundCloud"
             )
 
         await interaction.response.send_message(

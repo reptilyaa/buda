@@ -1961,7 +1961,7 @@ async def defer_thinking(
 
 @tree.command(
     name="play",
-    description="▶️ Воспроизвести музыку с YouTube или SoundCloud",
+    description="▶️ Воспроизвести музыку с SoundCloud",
 )
 async def play(
     interaction: discord.Interaction,
@@ -3049,7 +3049,7 @@ def create_help_embed():
             "🛠 **Модерация**\n"
             "Управление сообщениями\n\n"
             "🎵 **Музыка**\n"
-            "YouTube, SoundCloud и управление плеером\n\n"
+            "SoundCloud и управление плеером\n\n"
             "🎉 **Развлечения**\n"
             "Мемы, животные и интересные факты\n\n"
             "🎮 **Игры**\n"
@@ -3275,12 +3275,11 @@ class HelpView(discord.ui.View):
 
                 "▶️ **/play <запрос>**\n"
                 "Воспроизвести музыку.\n"
-                "Поддерживаются **YouTube** и **SoundCloud**.\n\n"
+                "Поддерживаются **SoundCloud**.\n\n"
 
                 "🔎 Можно указать:\n"
                 "• название песни\n"
                 "• исполнителя\n"
-                "• ссылку на YouTube\n"
                 "• ссылку на SoundCloud\n\n"
 
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
